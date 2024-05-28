@@ -3,100 +3,131 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Polygon GUI with lil-gui</title>
-    <script type="module">
-        import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/+esm';
-        import { addActionOptions } from './actionModule.js';
-
-        // Initial polygon settings
-        const polygonSettings = {
-            sides: 5,
-            color: '#ff0000',
-            size: 100
-        };
-
-        const defaultPolygonSettings = { ...polygonSettings };
-
-        // Function to draw the polygon
-        function drawPolygon() {
-            const canvas = document.getElementById('canvas');
-            const ctx = canvas.getContext('2d');
-            const { sides, color, size } = polygonSettings;
-            const centerX = canvas.width / 2;
-            const centerY = canvas.height / 2;
-
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.beginPath();
-            ctx.moveTo(
-                centerX + size * Math.cos(0),
-                centerY + size * Math.sin(0)
-            );
-
-            for (let i = 1; i <= sides; i++) {
-                ctx.lineTo(
-                    centerX + size * Math.cos((i * 2 * Math.PI) / sides),
-                    centerY + size * Math.sin((i * 2 * Math.PI) / sides)
-                );
-            }
-
-            ctx.closePath();
-            ctx.fillStyle = color;
-            ctx.fill();
-        }
-
-        // Create the GUI
-        const gui = new GUI();
-
-        // Add controllers
-        const controllers = [
-            gui.add(polygonSettings, 'sides', 3, 12).step(1).onChange(drawPolygon),
-            gui.addColor(polygonSettings, 'color').onChange(drawPolygon),
-            gui.add(polygonSettings, 'size', 50, 200).onChange(drawPolygon)
-        ];
-
-        // Add action options with a unique context
-        addActionOptions(gui, controllers, defaultPolygonSettings, drawPolygon, 'PolygonExample');
-
-        // Initial draw
-        drawPolygon();
-
-        // Make canvas responsive
-        function resizeCanvas() {
-            const canvas = document.getElementById('canvas');
-            canvas.width = window.innerWidth * 0.8;
-            canvas.height = window.innerHeight * 0.8;
-            drawPolygon();
-        }
-
-        window.addEventListener('resize', resizeCanvas);
-        resizeCanvas();
-
-    </script>
+    <title>OSC WebSocket Demo</title>
     <style>
-        body {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            background: #f0f0f0;
-        }
-
-        #canvas {
+        canvas {
             border: 1px solid black;
-            max-width: 100%;
-            max-height: 100%;
-        }
-
-        .lil-gui {
-            position: absolute;
-            top: 20px;
-            right: 20px;
         }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <canvas id="drawingCanvas" width="600" height="600"></canvas>
+    <script type="module">
+        import { GUI } from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/+esm';
+
+        // Load osc.js as a global variable
+        const oscScript = document.createElement('script');
+        oscScript.src = 'https://cdn.jsdelivr.net/npm/osc/dist/osc-browser.min.js';
+        document.head.appendChild(oscScript);
+
+        oscScript.onload = () => {
+            const { WebSocketPort } = osc;
+
+            // Create GUI for polygon drawing tool
+            const params = {
+                sides: 3,
+                color: '#ff0000',
+                size: 100,
+                rotation: 0
+            };
+
+            const gui = new GUI();
+            const sidesController = gui.add(params, 'sides', 3, 12).step(1).onChange(value => {
+                drawPolygon();
+                sendOSCMessage('/sides', value);
+            });
+            const colorController = gui.addColor(params, 'color').onChange(value => {
+                drawPolygon();
+                sendOSCMessage('/color', value);
+            });
+            const sizeController = gui.add(params, 'size', 10, 300).onChange(value => {
+                drawPolygon();
+                sendOSCMessage('/size', value);
+            });
+            const rotationController = gui.add(params, 'rotation', 0, 360).onChange(value => {
+                drawPolygon();
+                sendOSCMessage('/rotation', value);
+            });
+
+            const canvas = document.getElementById('drawingCanvas');
+            const ctx = canvas.getContext('2d');
+
+            function drawPolygon() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.beginPath();
+                const angle = (Math.PI * 2) / params.sides;
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                ctx.moveTo(
+                    centerX + params.size * Math.cos(params.rotation * Math.PI / 180),
+                    centerY + params.size * Math.sin(params.rotation * Math.PI / 180)
+                );
+                for (let i = 1; i <= params.sides; i++) {
+                    ctx.lineTo(
+                        centerX + params.size * Math.cos(angle * i + params.rotation * Math.PI / 180),
+                        centerY + params.size * Math.sin(angle * i + params.rotation * Math.PI / 180)
+                    );
+                }
+                ctx.closePath();
+                ctx.fillStyle = params.color;
+                ctx.fill();
+            }
+
+            drawPolygon();
+
+            // Setup OSC WebSocket
+            const oscPort = new WebSocketPort({
+                url: "ws://localhost:8080"
+            });
+
+            oscPort.open();
+
+            oscPort.on("message", function (oscMsg) {
+                console.log("An OSC message just arrived!", oscMsg);
+                const { address, args } = oscMsg;
+                if (args && args.length > 0) {
+                    const value = args[0];
+                    console.log(`Received OSC message: ${address} - ${value}`);
+                    console.log(`Type of value: ${typeof value}`);
+                    switch (address) {
+                        case '/sides':
+                            params.sides = value;
+                            sidesController.setValue(value);
+                            console.log(`Updated sides to ${value}`);
+                            break;
+                        case '/color':
+                            params.color = value;
+                            colorController.setValue(value);
+                            console.log(`Updated color to ${value}`);
+                            break;
+                        case '/size':
+                            params.size = value;
+                            sizeController.setValue(value);
+                            console.log(`Updated size to ${value}`);
+                            break;
+                        case '/rotation':
+                            params.rotation = value;
+                            rotationController.setValue(value);
+                            console.log(`Updated rotation to ${value}`);
+                            break;
+                        default:
+                            console.log(`Unknown address: ${address}`);
+                    }
+                    drawPolygon();
+                } else {
+                    console.log("Received OSC message with no arguments.");
+                }
+            });
+
+            function sendOSCMessage(parameter, value) {
+                const message = {
+                    address: parameter,
+                    args: [value]
+                };
+                oscPort.send(message);
+                console.log(`Sent OSC message: ${parameter} - ${value}`);
+            }
+        };
+    </script>
 </body>
 </html>

@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OSC WebSocket Demo</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+        }
+        #showButton {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            border: 1px dotted white;
+            cursor: pointer;
+            transition: opacity 2s;
+            opacity: 0;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="drawingCanvas" width="600" height="600"></canvas>
+    <div id="showButton" onclick="toggleGUIVisibility()">Show</div>
+    <script type="module">
+        import { GUI } from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/+esm';
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const oscScript = document.createElement('script');
+            oscScript.src = 'https://cdn.jsdelivr.net/npm/osc/dist/osc-browser.min.js';
+            document.head.appendChild(oscScript);
+
+            oscScript.onload = () => {
+                const { WebSocketPort } = osc;
+
+                // Define parameters with metadata and update functions
+                const params = {
+                    sides: { value: 3, min: 3, max: 12, step: 1, type: 'int', onUpdate: drawPolygon },
+                    color: { value: '#ff0000', type: 'color', onUpdate: drawPolygon },
+                    size: { value: 100, min: 10, max: 300, type: 'number', onUpdate: drawPolygon },
+                    transform: {
+                        value: {
+                            rotation: { value: 0, min: 0, max: 360, step: 1, type: 'number', onUpdate: drawPolygon },
+                            position_x: { value: 0, min: -300, max: 300, step: 1, type: 'number', onUpdate: drawPolygon },
+                            position_y: { value: 0, min: -300, max: 300, step: 1, type: 'number', onUpdate: drawPolygon }
+                        },
+                        type: 'folder'
+                    },
+                    settings: {
+                        value: {
+                            gui: {
+                                value: {
+                                    hide: { value: false, type: 'button', onUpdate: toggleGUIVisibility }
+                                },
+                                type: 'folder'
+                            },
+                            websocket: {
+                                value: {
+                                    port: { value: 8080, min: 1024, max: 65535, step: 1, type: 'int', onUpdate: handlePortUpdate },
+                                    connect: { value: false, type: 'button', onUpdate: connectWebSocket },
+                                    disconnect: { value: false, type: 'button', onUpdate: disconnectWebSocket },
+                                    dump: { value: false, type: 'button', onUpdate: () => dumpParameters(params, '') },
+                                    debugLog: { value: false, type: 'boolean', onUpdate: handleDebugLogToggle },
+                                    autoReconnect: { value: false, type: 'boolean', onUpdate: handleAutoReconnectToggle },
+                                    status: { value: 'Disconnected', type: 'label' }
+                                },
+                                type: 'folder'
+                            }
+                        },
+                        type: 'folder'
+                    }
+                };
+
+                let oscPort = null;
+                let reconnectInterval = null;
+                let guiVisible = true;
+
+                const gui = new GUI();
+                const controls = {};
+
+                // Function to create GUI controls dynamically
+                function createGUIControls(folder, obj, path) {
+                    for (const key in obj) {
+                        const param = obj[key];
+                        if (param.type === 'folder') {
+                            const subFolder = folder.addFolder(key);
+                            createGUIControls(subFolder, param.value, `${path}/${key}`);
+                        } else {
+                            const control = createControl(folder, param, key, path);
+                            controls[`${path}/${key}`] = control;
+                        }
+                    }
+                }
+
+                // Function to create individual control based on parameter metadata
+                function createControl(folder, param, key, path) {
+                    let control;
+                    if (param.type === 'number' || param.type === 'int') {
+                        control = folder.add(param, 'value', param.min, param.max).name(key);
+                        if (param.step !== undefined) {
+                            control.step(param.step);
+                        }
+                        control.onChange(value => {
+                            if (param.type === 'int') value = Math.round(value);
+                            sendOSCMessage(`${path}/${key}`, value);
+                            if (param.onUpdate) param.onUpdate();
+                        });
+                    } else if (param.type === 'color') {
+                        control = folder.addColor(param, 'value').name(key).onChange(value => {
+                            sendOSCMessage(`${path}/${key}`, value);
+                            if (param.onUpdate) param.onUpdate();
+                        });
+                    } else if (param.type === 'button') {
+                        control = folder.add(param, 'value').name(key).onChange(() => {
+                            param.value = false; // reset button state
+                            if (param.onUpdate) param.onUpdate();
+                        });
+                    } else if (param.type === 'boolean') {
+                        control = folder.add(param, 'value').name(key).onChange(value => {
+                            if (param.onUpdate) param.onUpdate();
+                        });
+                    } else if (param.type === 'label') {
+                        control = folder.add(param, 'value').name(key).listen();
+                    }
+                    return control;
+                }
+
+                createGUIControls(gui, params, '');
+
+                const canvas = document.getElementById('drawingCanvas');
+                const ctx = canvas.getContext('2d');
+                const showButton = document.getElementById('showButton');
+
+                function drawPolygon() {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.beginPath();
+                    const angle = (Math.PI * 2) / params.sides.value;
+                    const centerX = canvas.width / 2 + params.transform.value.position_x.value;
+                    const centerY = canvas.height / 2 + params.transform.value.position_y.value;
+                    ctx.moveTo(
+                        centerX + params.size.value * Math.cos(params.transform.value.rotation.value * Math.PI / 180),
+                        centerY + params.size.value * Math.sin(params.transform.value.rotation.value * Math.PI / 180)
+                    );
+                    for (let i = 1; i <= params.sides.value; i++) {
+                        ctx.lineTo(
+                            centerX + params.size.value * Math.cos(angle * i + params.transform.value.rotation.value * Math.PI / 180),
+                            centerY + params.size.value * Math.sin(angle * i + params.transform.value.rotation.value * Math.PI / 180)
+                        );
+                    }
+                    ctx.closePath();
+                    ctx.fillStyle = params.color.value;
+                    ctx.fill();
+                }
+
+                drawPolygon();
+
+                function connectWebSocket() {
+                    if (oscPort) {
+                        oscPort.close();
+                    }
+                    oscPort = new WebSocketPort({
+                        url: `ws://localhost:${params.settings.value.websocket.value.port.value}`
+                    });
+
+                    oscPort.open();
+
+                    oscPort.on("open", function () {
+                        params.settings.value.websocket.value.status.value = 'Connected';
+                        logDebug('WebSocket connected');
+                        stopAutoReconnect();
+                    });
+
+                    oscPort.on("close", function () {
+                        params.settings.value.websocket.value.status.value = 'Disconnected';
+                        logDebug('WebSocket disconnected');
+                        if (params.settings.value.websocket.value.autoReconnect.value) {
+                            startAutoReconnect();
+                        }
+                    });
+
+                    oscPort.on("message", function (oscMsg) {
+                        logDebug("An OSC message just arrived!", oscMsg);
+                        const { address, args } = oscMsg;
+                        if (args && args.length > 0) {
+                            const value = args[0];
+                            if (controls[address]) {
+                                updateParameter(params, address.split('/').slice(1), value);
+                                controls[address].setValue(value).updateDisplay();
+                                if (controls[address].__onUpdate) controls[address].__onUpdate();
+                            } else {
+                                logDebug(`Unknown address: ${address}`);
+                            }
+                        } else {
+                            logDebug("Received OSC message with no arguments.");
+                        }
+                    });
+                }
+
+                function disconnectWebSocket() {
+                    if (oscPort) {
+                        oscPort.close();
+                    }
+                    params.settings.value.websocket.value.status.value = 'Disconnected';
+                    logDebug('WebSocket disconnected');
+                    stopAutoReconnect();
+                }
+
+                function sendOSCMessage(parameter, value) {
+                    if (oscPort && oscPort.socket.readyState === WebSocket.OPEN) {
+                        const message = {
+                            address: parameter,
+                            args: [value]
+                        };
+                        oscPort.send(message);
+                        logDebug(`Sent OSC message: ${parameter} - ${value}`);
+                    }
+                }
+
+                function dumpParameters(obj, path) {
+                    for (const key in obj) {
+                        const param = obj[key];
+                        if (param.type === 'folder') {
+                            dumpParameters(param.value, `${path}/${key}`);
+                        } else if (param.type !== 'button') {
+                            sendOSCMessage(`${path}/${key}`, param.value);
+                        }
+                    }
+                }
+
+                function updateParameter(obj, path, value) {
+                    const key = path.shift();
+                    if (path.length === 0) {
+                        obj[key].value = value;
+                        if (obj[key].onUpdate) obj[key].onUpdate();
+                    } else {
+                        updateParameter(obj[key].value, path, value);
+                    }
+                }
+
+                function handlePortUpdate() {
+                    if (params.settings.value.websocket.value.status.value === 'Connected') {
+                        disconnectWebSocket();
+                        connectWebSocket();
+                    }
+                }
+
+                function handleDebugLogToggle() {
+                    logDebug('Debug logging', params.settings.value.websocket.value.debugLog.value ? 'enabled' : 'disabled');
+                }
+
+                function handleAutoReconnectToggle() {
+                    if (params.settings.value.websocket.value.autoReconnect.value) {
+                        if (params.settings.value.websocket.value.status.value === 'Disconnected') {
+                            startAutoReconnect();
+                        }
+                    } else {
+                        stopAutoReconnect();
+                    }
+                }
+
+                function logDebug(...args) {
+                    if (params.settings.value.websocket.value.debugLog.value) {
+                        console.log(...args);
+                    }
+                }
+
+                function startAutoReconnect() {
+                    if (!reconnectInterval) {
+                        reconnectInterval = setInterval(() => {
+                            if (params.settings.value.websocket.value.status.value === 'Disconnected') {
+                                logDebug('Attempting to reconnect WebSocket...');
+                                connectWebSocket();
+                            }
+                        }, 1000);
+                    }
+                }
+
+                function stopAutoReconnect() {
+                    if (reconnectInterval) {
+                        clearInterval(reconnectInterval);
+                        reconnectInterval = null;
+                    }
+                }
+
+                function toggleGUIVisibility() {
+                    guiVisible = !guiVisible;
+                    gui.domElement.style.display = guiVisible ? 'block' : 'none';
+                    showButton.style.opacity = guiVisible ? '0' : '1';
+                    showButton.style.pointerEvents = guiVisible ? 'none' : 'auto';
+                    if (!guiVisible) {
+                        setTimeout(() => {
+                            showButton.style.opacity = '0';
+                            showButton.style.pointerEvents = 'auto';
+                        }, 2000);
+                    }
+                }
+
+                // Expose the function to the global scope
+                window.toggleGUIVisibility = toggleGUIVisibility;
+            };
+        });
+    </script>
+</body>
+</html>
